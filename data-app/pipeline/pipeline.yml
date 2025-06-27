@@ -1,0 +1,217 @@
+# template.yaml
+apiVersion: backstage.io/v1beta2
+kind: Template
+metadata:
+  name: simple-etl-databricks-template
+  title: Pipeline ETL Simple (Unity Catalog -> Blob Storage)
+  description: Crea un pipeline ETL programado en Databricks, con código en un repositorio Git.
+  tags:
+    - etl
+    - databricks
+    - unity-catalog
+    - azure
+    - data-engineering
+spec:
+  owner: user:guest
+  type: pipeline
+
+  parameters:
+    - title: Información Básica del Pipeline
+      properties:
+        pipeline_name:
+          title: Nombre del Pipeline ETL
+          type: string
+          description: Un nombre corto y único para tu pipeline ETL (ej. 'ventas-diarias').
+          ui:autofocus: true
+          ui:options:
+            maxLength: 50
+        owner:
+          title: Propietario del Pipeline
+          type: string
+          description: Equipo o usuario responsable del pipeline.
+          ui:field: OwnerPicker
+          ui:options:
+            allowedKinds: ['Group', 'User']
+
+    - title: Configuración de la Fuente (Unity Catalog)
+      properties:
+        unity_catalog_source_table:
+          title: Tabla Fuente de Unity Catalog
+          type: string
+          description: Nombre completo de la tabla (ej. `catalog.schema.table_name`).
+
+    - title: Configuración de la Transformación (Python)
+      properties:
+        # Aquí no pedimos la ruta, la generamos automáticamente
+        # Se asume que el usuario proporcionará la lógica en el archivo generado
+        # transformation_entrypoint:
+        #   title: Nombre de la Función de Transformación
+        #   type: string
+        #   description: El nombre de la función Python que será el entrypoint (ej. 'run_transformation').
+        #   default: "run_transformation"
+
+    - title: Configuración del Destino (Azure Blob Storage)
+      properties:
+        blob_storage_account:
+          title: Nombre de la Cuenta de Azure Blob Storage
+          type: string
+          description: Nombre de la cuenta de almacenamiento donde se escribirán los datos.
+        blob_storage_container:
+          title: Nombre del Contenedor de Blob Storage
+          type: string
+          description: Nombre del contenedor dentro de la cuenta de almacenamiento.
+        blob_storage_path:
+          title: Ruta Destino en Blob Storage
+          type: string
+          description: Prefijo o ruta dentro del contenedor (ej. `processed/data/`).
+
+    - title: Programación Diaria y Conexión a Databricks
+      properties:
+        schedule_time:
+          title: Hora de Ejecución Diaria (HH:MM)
+          type: string
+          description: La hora del día en formato HH:MM (ej. 03:00 para 3 AM) en la zona horaria de tu workspace de Databricks.
+          pattern: "^([01]\\d|2[0-3]):([0-5]\\d)$" # Validación de formato HH:MM
+          default: "03:00"
+        databricks_workspace_url:
+          title: URL del Workspace de Databricks
+          type: string
+          description: La URL de tu workspace de Databricks (ej. `https://adb-XXXXXXXXXXXXXXX.XX.databricks.com/`).
+        databricks_access_token:
+          title: Token de Acceso de Databricks
+          type: string
+          description: Un token de acceso personal de Databricks con permisos suficientes (Jobs, Clusters, Repos).
+          ui:widget: password # Para ocultar el valor
+        databricks_timezone_id:
+          title: Zona Horaria del Workspace de Databricks
+          type: string
+          description: ID de la zona horaria de IANA (ej. `America/Argentina/Buenos_Aires`).
+          default: "America/Argentina/Buenos_Aires" # Ajustar a tu zona horaria real
+        repoUrl:
+          title: URL del Repositorio de Código
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: ['github.com', 'dev.azure.com'] # Ajusta según tu VCS
+
+    - title: Configuración de Azure DevOps (para CI/CD)
+      properties:
+        azure_devops_org_url:
+          title: URL de tu Organización de Azure DevOps
+          type: string
+          description: La URL de tu organización (ej. `https://dev.azure.com/your-org`).
+        azure_devops_project_name:
+          title: Nombre del Proyecto de Azure DevOps
+          type: string
+          description: El nombre del proyecto donde se creará el pipeline.
+        azure_devops_service_connection:
+          title: Nombre de la Conexión de Servicio de Azure DevOps
+          type: string
+          description: Nombre de una conexión de servicio existente en Azure DevOps para acceder a Azure Resources (ej. Azure Container Registry, Key Vault).
+
+  steps:
+    - id: calculate-cron
+      name: Calcular Expresión Cron
+      action: common:create-json
+      input:
+        json:
+          # Los minutos son el substring 3 y 4
+          # Las horas son el substring 0 y 1
+          # El resto son comodines para día del mes, mes y día de la semana
+          # La '?' al final es un comodín para el año, requerido por Quartz Cron (Databricks)
+          calculated_cron_schedule: "${{ parameters.schedule_time.substring(3, 2) }} ${{ parameters.schedule_time.substring(0, 2) }} * * ? *"
+
+    - id: fetch-base
+      name: Obtener Plantilla Base
+      action: fetch:template
+      input:
+        url: ./content
+        values:
+          # Pasa todos los parámetros al contenido de la plantilla
+          pipeline_name: ${{ parameters.pipeline_name | slugify }}
+          unity_catalog_source_table: ${{ parameters.unity_catalog_source_table }}
+          blob_storage_account: ${{ parameters.blob_storage_account }}
+          blob_storage_container: ${{ parameters.blob_storage_container }}
+          blob_storage_path: ${{ parameters.blob_storage_path }}
+          schedule_time: ${{ parameters.schedule_time }}
+          calculated_cron_schedule: ${{ steps['calculate-cron'].output.calculated_cron_schedule }} # Usa el valor calculado
+          databricks_workspace_url: ${{ parameters.databricks_workspace_url }}
+          databricks_timezone_id: ${{ parameters.databricks_timezone_id }}
+          azure_devops_org_url: ${{ parameters.azure_devops_org_url }}
+          azure_devops_project_name: ${{ parameters.azure_devops_project_name }}
+          azure_devops_service_connection: ${{ parameters.azure_devops_service_connection }}
+          owner: ${{ parameters.owner }}
+
+
+    - id: publish
+      name: Publicar Código
+      action: publish:github # O publish:azureDevOps
+      input:
+        allowedHosts: ['github.com'] # Ajusta
+        repoUrl: ${{ parameters.repoUrl }}
+        # Si usas Azure Repos, necesitarás el token de Azure DevOps para el publish
+        # token: ${{ parameters.azure_devops_access_token }} # Si se requiere un token para el publish
+
+    - id: create-databricks-job
+      name: Crear Job en Databricks
+      action: custom:create-databricks-etl-job # ¡Aquí viene la custom action!
+      input:
+        workspaceUrl: ${{ parameters.databricks_workspace_url }}
+        accessToken: ${{ parameters.databricks_access_token }}
+        jobName: ${{ parameters.pipeline_name | slugify }}-etl-job
+        pythonFilePath: "src/${{ parameters.pipeline_name | slugify }}_transform.py" # Ruta del entrypoint
+        gitSourceUrl: ${{ steps.publish.output.remoteUrl }}
+        gitBranch: main # O una rama configurable
+        scheduleCron: ${{ steps['calculate-cron'].output.calculated_cron_schedule }} # Usa el cron calculado
+        timezoneId: ${{ parameters.databricks_timezone_id }}
+        jobParameters: # Parámetros a pasar al script Python
+          - name: source_table
+            value: ${{ parameters.unity_catalog_source_table }}
+          - name: target_storage_account
+            value: ${{ parameters.blob_storage_account }}
+          - name: target_storage_container
+            value: ${{ parameters.blob_storage_container }}
+          - name: target_storage_path
+            value: ${{ parameters.blob_storage_path }}
+        # Opcional: Configuración del cluster
+        clusterConfig:
+          spark_version: "14.3.x-scala2.12"
+          node_type_id: "Standard_DS3_v2"
+          num_workers: 2
+          autotermination_minutes: 60
+
+    - id: create-azure-pipeline
+      name: Crear Pipeline de Azure DevOps
+      action: custom:create-azure-devops-pipeline # ¡Nueva custom action!
+      input:
+        orgUrl: ${{ parameters.azure_devops_org_url }}
+        projectName: ${{ parameters.azure_devops_project_name }}
+        repoName: ${{ steps.publish.output.repoName }} # Nombre del repo generado
+        pipelineName: ${{ parameters.pipeline_name | slugify }}-ci-cd
+        pipelineYamlPath: 'azure-pipelines.yaml' # Ruta al archivo YAML generado en el repo
+        serviceConnection: ${{ parameters.azure_devops_service_connection }}
+        # Pasa el Job ID de Databricks como una variable de pipeline en Azure DevOps
+        pipelineVariables:
+          DATABRICKS_JOB_ID: ${{ steps['create-databricks-job'].output.job_id }}
+          DATABRICKS_WORKSPACE_URL: ${{ parameters.databricks_workspace_url }}
+          # DATABRICKS_ACCESS_TOKEN_SECRET: (Se debe configurar como secreto en Azure DevOps manualmente o a través de Key Vault)
+
+    - id: register
+      name: Registrar en Catálogo
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+        values:
+          databricks_job_id: ${{ steps['create-databricks-job'].output.job_id }} # Inyecta el Job ID en el catalog-info.yaml
+
+  output:
+    links:
+      - title: Repositorio de Código
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: Entidad en Catálogo
+        url: ${{ steps.register.output.entityRef | backstageEntityUrl }}
+      - title: Job en Databricks
+        url: ${{ parameters.databricks_workspace_url }}/#job/${{ steps['create-databricks-job'].output.job_id }}
+      - title: Pipeline de Azure DevOps
+        url: ${{ parameters.azure_devops_org_url }}/${{ parameters.azure_devops_project_name }}/_build?definitionId=${{ steps['create-azure-pipeline'].output.pipeline_id }} # Asume que la custom action devuelve el pipeline_id
